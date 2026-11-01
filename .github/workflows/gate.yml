@@ -7,8 +7,9 @@
 # that commit, sets up the tools and reports the result back to it.
 #
 # It is dispatched by hand (or with `gh workflow run gate.yml -R
-# releaseszenderock/neus-ci -f SOURCE_REF=...`), never by a push or a pull
-# request, so no fork can reach the token.
+# releaseszenderock/neus-ci -f SOURCE_REF=...`), and on each new head of the
+# source's main by watch-main.yml; never by a push or a pull request to this
+# repository, so no fork can reach the token.
 name: Neus Gate
 
 run-name: Gate ${{ inputs.SOURCE_REF }}${{ inputs.LABEL != '' && format(' ({0})', inputs.LABEL) || '' }}
