@@ -1,0 +1,123 @@
+# Neus quality gate, run on public runners for the private zenderock/Neus-Platform.
+#
+# This file is versioned in the private source (infra/github/neus-ci/) as the
+# canonical template, and installed at .github/workflows/gate.yml in the public
+# releaseszenderock/neus-ci. What the gate runs is the source's
+# scripts/ci/public-gate.sh, at the commit checked: this workflow only fetches
+# that commit, sets up the tools and reports the result back to it.
+#
+# It is dispatched by hand (or with `gh workflow run gate.yml -R
+# releaseszenderock/neus-ci -f SOURCE_REF=...`), never by a push or a pull
+# request, so no fork can reach the token.
+name: Neus Gate
+
+run-name: Gate ${{ inputs.SOURCE_REF }}${{ inputs.LABEL != '' && format(' ({0})', inputs.LABEL) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOURCE_REF:
+        description: Branch, tag or exact commit of zenderock/Neus-Platform
+        required: true
+        default: main
+        type: string
+      CHECKS:
+        description: 'Comma-separated: backend, sdk, landing, frontend-css, or all'
+        required: false
+        default: all
+        type: string
+      LABEL:
+        description: Optional label shown in the run name (e.g. PR #491)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neus-gate-${{ inputs.SOURCE_REF }}-${{ inputs.CHECKS }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SOURCE_REPOSITORY: zenderock/Neus-Platform
+      STATUS_CONTEXT: neus-ci/gate
+    steps:
+      # A fine-grained token limited to zenderock/Neus-Platform: Contents read,
+      # Commit statuses read and write. Credentials are not kept in the checkout.
+      - name: Check out private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ inputs.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Resolve source commit
+        env:
+          REQUESTED_SOURCE_REF: ${{ inputs.SOURCE_REF }}
+          CHECKS: ${{ inputs.CHECKS }}
+        run: |
+          sha="$(git -C source rev-parse HEAD)"
+          echo "SOURCE_SHA=${sha}" >> "$GITHUB_ENV"
+          {
+            echo "\`zenderock/Neus-Platform\` ref \`${REQUESTED_SOURCE_REF}\`, commit \`${sha}\`, checks \`${CHECKS}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report pending status to private source
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          test -n "$SOURCE_REPO_TOKEN"
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $SOURCE_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$SOURCE_REPOSITORY/statuses/$SOURCE_SHA" \
+            -d "$(jq -cn --arg target_url "$TARGET_URL" --arg context "$STATUS_CONTEXT" \
+              '{state:"pending",target_url:$target_url,description:"Neus public CI is running",context:$context}')"
+
+      - name: Set up Go (version from backend/go.mod)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: source/backend/go.mod
+          cache-dependency-path: source/backend/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Run the source's quality gate
+        working-directory: source
+        env:
+          NEUS_GATE_CHECKS: ${{ inputs.CHECKS }}
+        run: bash scripts/ci/public-gate.sh
+
+      - name: Report final status to private source
+        if: ${{ always() && env.SOURCE_SHA != '' }}
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GATE_JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$GATE_JOB_STATUS" = "success" ]; then
+            state=success; description="Neus public CI passed"
+          else
+            state=failure; description="Neus public CI failed"
+          fi
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $SOURCE_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$SOURCE_REPOSITORY/statuses/$SOURCE_SHA" \
+            -d "$(jq -cn --arg state "$state" --arg target_url "$TARGET_URL" --arg description "$description" --arg context "$STATUS_CONTEXT" \
+              '{state:$state,target_url:$target_url,description:$description,context:$context}')"
