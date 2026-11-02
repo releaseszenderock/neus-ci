@@ -144,6 +144,9 @@ jobs:
     name: Windows (${{ matrix.id }})
     needs: [start, test]
     runs-on: windows-2025
+    # contents: write only to push the notch screenshots to a ci-shots/ branch.
+    permissions:
+      contents: write
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -199,6 +202,9 @@ jobs:
             [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
             [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
             [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
+            public static string Foreground() { var b = new System.Text.StringBuilder(256); GetWindowText(GetForegroundWindow(), b, 256); return b.ToString(); }
           }
           '@
           [Input]::SetProcessDPIAware() | Out-Null
@@ -210,16 +216,7 @@ jobs:
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
             $bmp.Save("smoke\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
-            # The top centre, where the notch is, also goes to the log (base64,
-            # between markers): artifacts are not always reachable.
-            $w = [Math]::Min(900, $b.Width); $h = [Math]::Min(360, $b.Height)
-            $crop = $bmp.Clone((New-Object System.Drawing.Rectangle ([int](($b.Width - $w) / 2)), 0, $w, $h), $bmp.PixelFormat)
-            $ms = New-Object System.IO.MemoryStream
-            $crop.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-            "SHOT-BEGIN $name"
-            [Convert]::ToBase64String($ms.ToArray()) -split '(.{1,4000})' | Where-Object { $_ } | ForEach-Object { "SHOT $_" }
-            "SHOT-END $name"
-            $crop.Dispose(); $g.Dispose(); $bmp.Dispose()
+            $g.Dispose(); $bmp.Dispose()
           }
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
@@ -252,6 +249,7 @@ jobs:
           $formProc = Get-Process -Id $form.Id
           [Input]::SetForegroundWindow($formProc.MainWindowHandle) | Out-Null
           Start-Sleep -Seconds 5
+          "Foreground before Fill: '$([Input]::Foreground())'"
           Shot '1-notch-down'
           # Fill sits at the island's right: centre + 137 px, 75 px down.
           [Input]::SetCursorPos([int]($b.Width / 2 + 137), 75) | Out-Null
@@ -260,6 +258,7 @@ jobs:
           [Input]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
           [Input]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
           Start-Sleep -Seconds 2
+          "Foreground after Fill: '$([Input]::Foreground())'"
           Shot '3-after-fill'
           [Input]::SetCursorPos([int]($b.Width / 2 + 300), 200) | Out-Null
           Start-Sleep -Milliseconds 500
@@ -276,6 +275,20 @@ jobs:
           if (-not $alive) { throw 'Inbox Mail did not stay running' }
           if ($text -notmatch '482193') { throw "Fill did not reach the text field (it holds '$text')" }
           "Fill typed the code into the focused field."
+      - name: Push the notch screenshots to a ci-shots branch
+        if: always() && steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls smoke/*.png >/dev/null 2>&1 || exit 0
+          dir="$RUNNER_TEMP/shots"; mkdir -p "$dir"; cp smoke/*.png "$dir/"
+          cd "$dir"
+          git init -q -b "ci-shots/${GITHUB_RUN_ID}"
+          git -c user.name="neus-ci" -c user.email="neus-ci@users.noreply.github.com" add .
+          git -c user.name="neus-ci" -c user.email="neus-ci@users.noreply.github.com" commit -qm "Notch screenshots, run ${GITHUB_RUN_ID}"
+          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/ci-shots/${GITHUB_RUN_ID}"
+          echo "Screenshots: branch ci-shots/${GITHUB_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload the notch screenshots
         if: always() && steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
