@@ -11,9 +11,10 @@
 # (INBOXMAIL_DISTRIBUTION_CHANNEL), so a store build never runs its own
 # updater:
 #   windows-direct  NSIS installer (per user). Its smoke installs it, starts
-#                   the app with INBOXMAIL_NOTCH_SMOKE=1 (a sample code drops
-#                   from the notch), clicks Fill over Notepad, checks that the
-#                   code reached Notepad, takes screenshots, uninstalls.
+#                   the app with INBOXMAIL_NOTCH_SMOKE=10 (a sample code drops
+#                   from the notch 10 s later), minimizes the main window,
+#                   clicks into a text field, clicks Fill, checks that the
+#                   code reached the field, takes screenshots, uninstalls.
 #   windows-msix    MSIX with the Store identity, uploaded UNSIGNED: Microsoft
 #                   signs Store packages. Its smoke signs a local copy with an
 #                   ephemeral certificate (never uploaded), installs, launches
@@ -213,9 +214,14 @@ jobs:
             [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
             [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
             [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
             [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
-            public static string Foreground() { var b = new System.Text.StringBuilder(256); GetWindowText(GetForegroundWindow(), b, 256); return b.ToString(); }
+            public static string Title(IntPtr h) { var b = new System.Text.StringBuilder(256); GetWindowText(h, b, 256); return b.ToString(); }
+            public static string Foreground() { return Title(GetForegroundWindow()); }
+            public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(0x0002, 0, 0, 0, IntPtr.Zero); mouse_event(0x0004, 0, 0, 0, IntPtr.Zero); }
           }
+          public struct RECT { public int Left, Top, Right, Bottom; }
           '@
           [Input]::SetProcessDPIAware() | Out-Null
           New-Item -ItemType Directory -Force -Path smoke | Out-Null
@@ -234,7 +240,7 @@ jobs:
           if ($null -eq $exe) { throw 'inbox-mail.exe not installed' }
           "Installed at $($exe.FullName)"
           # A small window with a text field holds the keyboard; the notch must
-          # not take it. It writes what it received and closes after 30 s.
+          # not take it. It writes what it received and closes after 60 s.
           $out = Join-Path $env:RUNNER_TEMP 'fill-target.txt'
           $target = Join-Path $env:RUNNER_TEMP 'fill-target.ps1'
           Set-Content -Path $target -Value @"
@@ -245,7 +251,7 @@ jobs:
           `$t.Width = 460; `$t.Left = 20; `$t.Top = 40; `$t.Font = New-Object Drawing.Font('Segoe UI', 18)
           `$f.Controls.Add(`$t)
           `$timer = New-Object Windows.Forms.Timer
-          `$timer.Interval = 30000
+          `$timer.Interval = 60000
           `$timer.Add_Tick({ Set-Content -Path '$out' -Value `$t.Text; `$f.Close() })
           `$timer.Start()
           `$f.Add_Shown({ `$f.Activate(); `$t.Focus() })
@@ -253,12 +259,30 @@ jobs:
           "@
           $form = Start-Process powershell -ArgumentList '-NoProfile', '-STA', '-File', $target -PassThru
           Start-Sleep -Seconds 4
-          $env:INBOXMAIL_NOTCH_SMOKE = '1'
+          # The sample code drops 10 s after start: time to put the app's main
+          # window away and give the keyboard to the field, as a user would.
+          $env:INBOXMAIL_NOTCH_SMOKE = '10'
           $app = Start-Process -FilePath $exe.FullName -PassThru
-          Start-Sleep -Seconds 3
+          $started = Get-Date
+          $main = [IntPtr]::Zero
+          while ($main -eq [IntPtr]::Zero -and ((Get-Date) - $started).TotalSeconds -lt 8) {
+            Start-Sleep -Milliseconds 300
+            foreach ($p in Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue) {
+              if ($p.MainWindowHandle -ne [IntPtr]::Zero -and [Input]::Title($p.MainWindowHandle) -eq 'Inbox Mail') { $main = $p.MainWindowHandle }
+            }
+          }
+          if ($main -ne [IntPtr]::Zero) { [Input]::ShowWindow($main, 6) | Out-Null; "Main window minimized" } else { "Main window not found" }
+          Start-Sleep -Milliseconds 800
           $formProc = Get-Process -Id $form.Id
-          [Input]::SetForegroundWindow($formProc.MainWindowHandle) | Out-Null
-          Start-Sleep -Seconds 5
+          $r = New-Object RECT
+          [Input]::GetWindowRect($formProc.MainWindowHandle, [ref]$r) | Out-Null
+          "Fill target at $($r.Left),$($r.Top) - $($r.Right),$($r.Bottom)"
+          # Into the text box: the client area starts below the title bar.
+          [Input]::Click([int](($r.Left + $r.Right) / 2), $r.Top + 90)
+          Start-Sleep -Milliseconds 500
+          "Foreground once the field is clicked: '$([Input]::Foreground())'"
+          $wait = 13 - ((Get-Date) - $started).TotalSeconds
+          if ($wait -gt 0) { Start-Sleep -Seconds $wait }
           "Foreground before Fill: '$([Input]::Foreground())'"
           Shot '1-notch-down'
           # Fill sits at the island's right: centre + 137 px, 75 px down.
@@ -274,7 +298,7 @@ jobs:
           Start-Sleep -Milliseconds 500
           Shot '4-pointer-beside'
           $alive = -not $app.HasExited
-          $deadline = (Get-Date).AddSeconds(40)
+          $deadline = (Get-Date).AddSeconds(70)
           while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
           $text = if (Test-Path $out) { (Get-Content -Raw $out).Trim() } else { '<no answer>' }
           "The text field holds: '$text'"

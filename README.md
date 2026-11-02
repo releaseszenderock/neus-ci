@@ -21,8 +21,9 @@ gh workflow run gate.yml -R releaseszenderock/neus-ci -f SOURCE_REF=my-branch -f
 source) from a branch, tag or commit: unit tests and typecheck, then one
 package per channel (Windows NSIS and MSIX, Linux `.deb`, snap, Flatpak). The
 NSIS package is installed on the runner and the notch is tried for real: a
-sample code drops (`INBOXMAIL_NOTCH_SMOKE=1`), Fill is clicked over Notepad,
-and the screenshots are kept. It reports `neus-ci/desktop` back to the source
+sample code drops (`INBOXMAIL_NOTCH_SMOKE=10`), the main window is minimized, a
+text field is clicked, Fill is clicked and the code must reach that field; the
+screenshots go to a `ci-shots/<run>` branch. It reports `neus-ci/desktop` back to the source
 commit. Nothing is signed or published; packages are kept three days.
 
 ```bash
