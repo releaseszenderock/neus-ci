@@ -1,0 +1,475 @@
+# Inbox Mail desktop (desktop/ in the private zenderock/Neus-Platform), built on
+# public runners: Actions cannot start runs in the private repository.
+#
+# This file is versioned in the private source (infra/github/neus-ci/) as the
+# canonical template, and installed at .github/workflows/desktop.yml in the
+# public releaseszenderock/neus-ci. It is dispatched by hand (or with `gh
+# workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=...`),
+# never by a push or a pull request, so no fork can reach the token.
+#
+# One package per distribution channel; the channel is compiled in
+# (INBOXMAIL_DISTRIBUTION_CHANNEL), so a store build never runs its own
+# updater:
+#   windows-direct  NSIS installer (per user). Its smoke installs it, starts
+#                   the app with INBOXMAIL_NOTCH_SMOKE=1 (a sample code drops
+#                   from the notch), clicks Fill over Notepad, checks that the
+#                   code reached Notepad, takes screenshots, uninstalls.
+#   windows-msix    MSIX with the Store identity, uploaded UNSIGNED: Microsoft
+#                   signs Store packages. Its smoke signs a local copy with an
+#                   ephemeral certificate (never uploaded), installs, launches
+#                   and removes it.
+#   linux-direct    .deb, and the scroll/newsletter benchmark under Xvfb
+#   linux-snap      strict snap built from the snap_store .deb
+#   linux-flatpak   Flatpak built from the flathub .deb
+#
+# Nothing is signed or published. Artifacts of a public repository can be
+# downloaded by any signed-in GitHub user, so they are kept briefly.
+# The result is reported as the `neus-ci/desktop` status on the source commit.
+name: Desktop
+
+run-name: Desktop ${{ inputs.SOURCE_REF }}${{ inputs.LABEL != '' && format(' ({0})', inputs.LABEL) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOURCE_REF:
+        description: Branch, tag or exact commit of zenderock/Neus-Platform
+        required: true
+        default: v5
+        type: string
+      CHANNELS:
+        description: 'Comma-separated: windows-direct, windows-msix, linux-direct, linux-snap, linux-flatpak (or all)'
+        required: false
+        default: all
+        type: string
+      LABEL:
+        description: Optional label shown in the run name (e.g. PR #510)
+        required: false
+        default: ''
+        type: string
+      RETENTION_DAYS:
+        description: Days to keep the packages (public repository, keep it short)
+        required: false
+        default: '3'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neus-desktop-${{ inputs.SOURCE_REF }}-${{ inputs.CHANNELS }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_REPOSITORY: zenderock/Neus-Platform
+  STATUS_CONTEXT: neus-ci/desktop
+  CHANNELS: ${{ inputs.CHANNELS }}
+
+jobs:
+  start:
+    name: Resolve and report pending
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Check out private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ inputs.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+          sparse-checkout: desktop/package.json
+      - name: Resolve source commit
+        id: resolve
+        env:
+          REQUESTED_SOURCE_REF: ${{ inputs.SOURCE_REF }}
+        run: |
+          sha="$(git -C source rev-parse HEAD)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "\`zenderock/Neus-Platform\` ref \`${REQUESTED_SOURCE_REF}\`, commit \`${sha}\`, channels \`${CHANNELS}\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report pending status to private source
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          SOURCE_SHA: ${{ steps.resolve.outputs.sha }}
+          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          test -n "$SOURCE_REPO_TOKEN"
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $SOURCE_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$SOURCE_REPOSITORY/statuses/$SOURCE_SHA" \
+            -d "$(jq -cn --arg target_url "$TARGET_URL" --arg context "$STATUS_CONTEXT" \
+              '{state:"pending",target_url:$target_url,description:"Desktop build is running",context:$context}')"
+
+  test:
+    name: Unit tests, typecheck, Rust
+    needs: start
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults: { run: { working-directory: source/desktop } }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ needs.start.outputs.sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22', cache: npm, cache-dependency-path: source/desktop/package-lock.json }
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: source/desktop/src-tauri, key: test }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      - name: Rust tests and clippy
+        working-directory: source/desktop/src-tauri
+        run: |
+          mkdir -p ../dist && touch ../dist/index.html
+          cargo test --locked
+          cargo clippy --locked -- -D clippy::correctness
+
+  windows:
+    name: Windows (${{ matrix.id }})
+    needs: [start, test]
+    runs-on: windows-2025
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: windows-direct, channel: direct, overlay: direct.windows.json, bundle: "--bundles nsis" }
+          - { id: windows-msix, channel: microsoft_store, overlay: msix.json, bundle: "--no-bundle" }
+    defaults: { run: { shell: bash, working-directory: source/desktop } }
+    steps:
+      - name: Selected?
+        id: pick
+        working-directory: .
+        run: |
+          if [ -z "$CHANNELS" ] || [ "$CHANNELS" = "all" ] || [[ ",$CHANNELS," == *",${{ matrix.id }},"* ]]; then echo "run=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.pick.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ needs.start.outputs.sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+      - if: steps.pick.outputs.run == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22', cache: npm, cache-dependency-path: source/desktop/package-lock.json }
+      - if: steps.pick.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.pick.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+        with: { workspaces: source/desktop/src-tauri, key: '${{ matrix.id }}' }
+      - if: steps.pick.outputs.run == 'true'
+        run: npm ci
+      - name: Build
+        if: steps.pick.outputs.run == 'true'
+        env:
+          INBOXMAIL_DISTRIBUTION_CHANNEL: ${{ matrix.channel }}
+        run: npx tauri build ${{ matrix.bundle }} --config "packaging/tauri/${{ matrix.overlay }}"
+
+      # --- windows-direct: install, notch smoke (Fill into Notepad), uninstall ---
+      - name: Install the NSIS package and smoke the notch
+        if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Input {
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
+            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+          }
+          '@
+          [Input]::SetProcessDPIAware() | Out-Null
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          function Shot($name) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("smoke\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+          }
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
+          $exe = Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter 'inbox-mail.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($null -eq $exe) { $exe = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter 'inbox-mail.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+          if ($null -eq $exe) { throw 'inbox-mail.exe not installed' }
+          "Installed at $($exe.FullName)"
+          # Notepad holds the keyboard; the notch must not take it.
+          $notepad = Start-Process notepad -PassThru
+          Start-Sleep -Seconds 3
+          $env:INBOXMAIL_NOTCH_SMOKE = '1'
+          $app = Start-Process -FilePath $exe.FullName -PassThru
+          Start-Sleep -Seconds 4
+          $np = Get-Process -Id $notepad.Id
+          [Input]::SetForegroundWindow($np.MainWindowHandle) | Out-Null
+          Start-Sleep -Seconds 4
+          Shot '1-notch-down'
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $scale = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width / [System.Windows.Forms.SystemInformation]::PrimaryMonitorSize.Width
+          # Fill sits at the island's right: centre + 137 px, 75 px down (logical).
+          $x = [int]($b.Width / 2 + 137 * $scale); $y = [int](75 * $scale)
+          [Input]::SetCursorPos($x, $y) | Out-Null
+          Start-Sleep -Milliseconds 600
+          Shot '2-pointer-on-fill'
+          [Input]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+          [Input]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+          Start-Sleep -Seconds 2
+          Shot '3-after-fill'
+          # Click-through: a click beside the island lands on what is under it.
+          [Input]::SetCursorPos([int]($b.Width / 2 + 230 * $scale), [int](150 * $scale)) | Out-Null
+          Start-Sleep -Milliseconds 400
+          Shot '4-pointer-beside'
+          # What Notepad holds now: select all, copy, read the clipboard.
+          [Input]::SetForegroundWindow($np.MainWindowHandle) | Out-Null
+          Start-Sleep -Milliseconds 500
+          [System.Windows.Forms.SendKeys]::SendWait('^a^c')
+          Start-Sleep -Milliseconds 500
+          $text = Get-Clipboard -Raw
+          "Notepad holds: '$text'"
+          $alive = -not $app.HasExited
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $notepad.Id -Force -ErrorAction SilentlyContinue
+          Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue | Stop-Process -Force
+          $uninstaller = Get-ChildItem (Split-Path $exe.FullName) -Filter 'uninstall*.exe' | Select-Object -First 1
+          if ($uninstaller) { Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait }
+          if (-not $alive) { throw 'Inbox Mail did not stay running' }
+          if ($text -notmatch '482193') { throw "Fill did not reach Notepad (it holds '$text')" }
+          "Fill typed the code into Notepad."
+      - name: Upload the notch screenshots
+        if: always() && steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notch-windows-screenshots-${{ github.run_id }}
+          path: source/desktop/smoke/*.png
+          if-no-files-found: ignore
+          retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
+
+      # --- windows-msix: assemble, smoke a locally signed copy ---
+      - name: Assemble the MSIX
+        if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-msix'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # --allow-placeholder until packaging/msix/identity.json holds the
+          # Partner Center identity; the smoke works with either.
+          node scripts/msix-layout.mjs --app-dir src-tauri/target/release --out target/msix-layout --allow-placeholder
+          $makeappx = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $makeappx) { throw 'makeappx.exe not found' }
+          & $makeappx.FullName pack /o /d target/msix-layout /p target/InboxMail.msix
+          if ($LASTEXITCODE -ne 0) { throw 'makeappx failed' }
+      - name: Smoke-install a locally signed copy of the MSIX
+        if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-msix'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path target/InboxMail.msix))
+          $reader = New-Object IO.StreamReader($zip.GetEntry('AppxManifest.xml').Open())
+          [xml]$manifest = $reader.ReadToEnd(); $reader.Close(); $zip.Dispose()
+          $publisher = $manifest.Package.Identity.Publisher
+          $name = $manifest.Package.Identity.Name
+          $signed = Join-Path $env:RUNNER_TEMP 'InboxMail-smoke.msix'
+          Copy-Item target/InboxMail.msix $signed
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $publisher -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy NonExportable -TextExtension @('2.5.29.19={text}')
+          $public = Join-Path $env:RUNNER_TEMP 'smoke.cer'
+          Export-Certificate -Cert $cert -FilePath $public | Out-Null
+          Import-Certificate -FilePath $public -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My $signed
+          if ($LASTEXITCODE -ne 0) { throw 'signtool failed' }
+          Add-AppxPackage -Path $signed
+          $package = Get-AppxPackage -Name $name
+          if ($null -eq $package) { throw "package $name not installed" }
+          Start-Process "shell:AppsFolder\$($package.PackageFamilyName)!InboxMail"
+          Start-Sleep -Seconds 10
+          $running = Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue
+          if ($null -eq $running) { throw 'Inbox Mail did not stay running' }
+          $running | Stop-Process -Force
+          Remove-AppxPackage -Package $package.PackageFullName
+
+      - if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-mail-windows-direct-${{ github.run_id }}
+          path: source/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
+      - if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-msix'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-mail-windows-msix-${{ github.run_id }}
+          path: source/desktop/target/InboxMail.msix
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
+
+  linux:
+    name: Linux .deb (${{ matrix.id }})
+    needs: [start, test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: linux-direct, channel: direct, overlay: direct.linux.json }
+          - { id: linux-snap, channel: snap_store, overlay: snap.json }
+          - { id: linux-flatpak, channel: flathub, overlay: flatpak.json }
+    defaults: { run: { working-directory: source/desktop } }
+    steps:
+      - name: Selected?
+        id: pick
+        working-directory: .
+        run: |
+          if [ -z "$CHANNELS" ] || [ "$CHANNELS" = "all" ] || [[ ",$CHANNELS," == *",${{ matrix.id }},"* ]]; then echo "run=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.pick.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ needs.start.outputs.sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+      - if: steps.pick.outputs.run == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22', cache: npm, cache-dependency-path: source/desktop/package-lock.json }
+      - if: steps.pick.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.pick.outputs.run == 'true'
+        uses: Swatinem/rust-cache@v2
+        with: { workspaces: source/desktop/src-tauri, key: '${{ matrix.id }}' }
+      - if: steps.pick.outputs.run == 'true'
+        name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev xvfb dbus-x11
+      - if: steps.pick.outputs.run == 'true'
+        run: npm ci
+      - if: steps.pick.outputs.run == 'true'
+        name: Build
+        env:
+          INBOXMAIL_DISTRIBUTION_CHANNEL: ${{ matrix.channel }}
+        run: |
+          npx tauri build --bundles deb --config "packaging/tauri/${{ matrix.overlay }}"
+          cp src-tauri/target/release/bundle/deb/*.deb inbox-mail.deb
+      - if: steps.pick.outputs.run == 'true' && matrix.id == 'linux-direct'
+        name: Benchmark under Xvfb (software rendering, a floor)
+        run: |
+          export INBOXMAIL_BENCH=1 INBOXMAIL_BENCH_OUT="$PWD/bench-linux.json"
+          timeout 300 dbus-run-session -- xvfb-run -a -s "-screen 0 1280x860x24" ./src-tauri/target/release/inbox-mail
+          cat bench-linux.json
+      - if: steps.pick.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-mail-${{ matrix.id }}-deb-${{ github.run_id }}
+          path: |
+            source/desktop/inbox-mail.deb
+            source/desktop/bench-linux.json
+          if-no-files-found: ignore
+          retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
+
+  snap:
+    name: Snap (strict)
+    needs: [start, linux]
+    if: ${{ !cancelled() && (inputs.CHANNELS == '' || inputs.CHANNELS == 'all' || contains(inputs.CHANNELS, 'linux-snap')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ needs.start.outputs.sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+          sparse-checkout: desktop/packaging
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with: { name: 'inbox-mail-linux-snap-deb-${{ github.run_id }}', path: deb }
+      - run: cp deb/inbox-mail.deb source/desktop/packaging/snap/inbox-mail.deb
+      - id: snap
+        uses: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1.3.0
+        with: { path: source/desktop/packaging/snap }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-mail-linux-snap-${{ github.run_id }}
+          path: ${{ steps.snap.outputs.snap }}
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
+
+  flatpak:
+    name: Flatpak
+    needs: [start, linux]
+    if: ${{ !cancelled() && (inputs.CHANNELS == '' || inputs.CHANNELS == 'all' || contains(inputs.CHANNELS, 'linux-flatpak')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-47
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ needs.start.outputs.sha }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+          sparse-checkout: desktop/packaging
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with: { name: 'inbox-mail-linux-flatpak-deb-${{ github.run_id }}', path: deb }
+      - run: cp deb/inbox-mail.deb source/desktop/packaging/flatpak/inbox-mail.deb
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: inbox-mail.flatpak
+          manifest-path: source/desktop/packaging/flatpak/email.useinbox.desktop.yml
+          cache-key: flatpak-builder-${{ needs.start.outputs.sha }}
+          upload-artifact: true
+
+  report:
+    name: Report final status
+    needs: [start, test, windows, linux, snap, flatpak]
+    if: ${{ always() && needs.start.outputs.sha != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report final status to private source
+        env:
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_TOKEN }}
+          SOURCE_SHA: ${{ needs.start.outputs.sha }}
+          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          state=success; description="Desktop build passed"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) state=failure; description="Desktop build failed" ;;
+            esac
+          done
+          curl --fail-with-body --silent --show-error -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $SOURCE_REPO_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/$SOURCE_REPOSITORY/statuses/$SOURCE_SHA" \
+            -d "$(jq -cn --arg state "$state" --arg target_url "$TARGET_URL" --arg description "$description" --arg context "$STATUS_CONTEXT" \
+              '{state:$state,target_url:$target_url,description:$description,context:$context}')"
