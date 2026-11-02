@@ -192,6 +192,10 @@ jobs:
         if: steps.pick.outputs.run == 'true'
         env:
           INBOXMAIL_DISTRIBUTION_CHANNEL: ${{ matrix.channel }}
+          # Direct downloads sign their update packages (tauri.conf.json holds the
+          # public key); a store build does not need the key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ matrix.channel == 'direct' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ matrix.channel == 'direct' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           # SQLCipher builds OpenSSL from source: its Configure needs a full
           # Perl, which Git Bash's is not. The runner ships Strawberry Perl.
           OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
@@ -203,7 +207,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: inbox-mail-windows-direct-${{ github.run_id }}
-          path: source/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            source/desktop/src-tauri/target/release/bundle/nsis/*.exe
+            source/desktop/src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
           retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
 
@@ -438,9 +444,14 @@ jobs:
         name: Build
         env:
           INBOXMAIL_DISTRIBUTION_CHANNEL: ${{ matrix.channel }}
+          # Direct downloads sign their update packages (tauri.conf.json holds the
+          # public key); a store build does not need the key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ matrix.channel == 'direct' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ matrix.channel == 'direct' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
           npx tauri build --bundles deb --config "packaging/tauri/${{ matrix.overlay }}"
           cp src-tauri/target/release/bundle/deb/*.deb inbox-mail.deb
+          if ls src-tauri/target/release/bundle/deb/*.deb.sig >/dev/null 2>&1; then cp src-tauri/target/release/bundle/deb/*.deb.sig inbox-mail.deb.sig; fi
       - if: steps.pick.outputs.run == 'true' && matrix.id == 'linux-direct'
         name: Benchmark under Xvfb (software rendering, a floor)
         run: |
@@ -453,6 +464,7 @@ jobs:
           name: inbox-mail-${{ matrix.id }}-deb-${{ github.run_id }}
           path: |
             source/desktop/inbox-mail.deb
+            source/desktop/inbox-mail.deb.sig
             source/desktop/bench-linux.json
           if-no-files-found: ignore
           retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
@@ -542,9 +554,22 @@ jobs:
           case "$(basename "$exe")" in *"_${version}_"*) ;; *) echo "::error::$(basename "$exe") is not version $version"; exit 1 ;; esac
           deb_version="$(dpkg-deb --field linux/inbox-mail.deb Version)"
           test "$deb_version" = "$version" || { echo "::error::the .deb is version $deb_version, not $version"; exit 1; }
+          # The app's updater reads latest.json and refuses a package whose
+          # signature does not match the public key it was built with.
+          test -s "${exe}.sig" || { echo "::error::no updater signature for the installer (TAURI_SIGNING_PRIVATE_KEY secret missing?)"; exit 1; }
+          test -s linux/inbox-mail.deb.sig || { echo "::error::no updater signature for the .deb"; exit 1; }
           mkdir out
           cp "$exe" out/InboxMail-Setup.exe
           cp linux/inbox-mail.deb out/inbox-mail_amd64.deb
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          jq -n --arg version "$version" --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes "InboxMail ${version}" \
+            --arg winSig "$(cat "${exe}.sig")" --arg winUrl "${base}/InboxMail-Setup.exe" \
+            --arg debSig "$(cat linux/inbox-mail.deb.sig)" --arg debUrl "${base}/inbox-mail_amd64.deb" \
+            '{version:$version, notes:$notes, pub_date:$date, platforms:{
+               "windows-x86_64-nsis":{signature:$winSig, url:$winUrl},
+               "windows-x86_64":{signature:$winSig, url:$winUrl},
+               "linux-x86_64-deb":{signature:$debSig, url:$debUrl}}}' > out/latest.json
           (cd out && sha256sum InboxMail-Setup.exe inbox-mail_amd64.deb > SHA256SUMS.txt)
           cat > notes.md <<NOTES
           **InboxMail ${version}**: the desktop app of [useinbox.email](https://useinbox.email), for Windows and Linux.

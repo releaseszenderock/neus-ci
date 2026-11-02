@@ -28,7 +28,8 @@ commit. Nothing is signed; packages are kept three days.
 
 With `RELEASE_TAG` (for example `v1.0.0`, equal to the app's version), the run
 also publishes the direct downloads as a GitHub Release of neus-ci:
-`InboxMail-Setup.exe`, `inbox-mail_amd64.deb` and `SHA256SUMS.txt`. The names
+`InboxMail-Setup.exe`, `inbox-mail_amd64.deb`, `SHA256SUMS.txt` and
+`latest.json` (what the installed apps check for updates). The names
 do not change from one version to the next, so
 `https://github.com/releaseszenderock/neus-ci/releases/latest/download/InboxMail-Setup.exe`
 always serves the newest installer. The job refuses a tag that does not match
@@ -44,6 +45,11 @@ gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=v5 -f CHA
 
 - `SOURCE_REPO_TOKEN`: a fine-grained token limited to `zenderock/Neus-Platform`,
   with **Contents: Read** and **Commit statuses: Read and write**.
+- `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the
+  updater key of InboxMail (its public half is in `desktop/src-tauri/tauri.conf.json`).
+  The direct builds (`windows-direct`, `linux-direct`) sign their packages with it,
+  and a release ships `latest.json`, which the installed apps read to update
+  themselves. Without the key those two builds fail.
 
 The canonical copy of this workflow and the architecture notes live in the
 private source under `infra/github/neus-ci/` and `docs/ci.md`.
