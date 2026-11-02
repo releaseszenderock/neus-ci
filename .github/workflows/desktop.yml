@@ -392,7 +392,7 @@ jobs:
   snap:
     name: Snap (strict)
     needs: [start, linux]
-    if: ${{ !cancelled() && (inputs.CHANNELS == '' || inputs.CHANNELS == 'all' || contains(inputs.CHANNELS, 'linux-snap')) }}
+    if: ${{ !cancelled() && needs.linux.result == 'success' && (inputs.CHANNELS == '' || inputs.CHANNELS == 'all' || contains(inputs.CHANNELS, 'linux-snap')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -420,7 +420,7 @@ jobs:
   flatpak:
     name: Flatpak
     needs: [start, linux]
-    if: ${{ !cancelled() && (inputs.CHANNELS == '' || inputs.CHANNELS == 'all' || contains(inputs.CHANNELS, 'linux-flatpak')) }}
+    if: ${{ !cancelled() && needs.linux.result == 'success' && (inputs.CHANNELS == '' || inputs.CHANNELS == 'all' || contains(inputs.CHANNELS, 'linux-flatpak')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     container:
