@@ -23,8 +23,11 @@
 #   linux-snap      strict snap built from the snap_store .deb
 #   linux-flatpak   Flatpak built from the flathub .deb
 #
-# Nothing is signed or published. Artifacts of a public repository can be
-# downloaded by any signed-in GitHub user, so they are kept briefly.
+# Nothing is signed. Artifacts of a public repository can be downloaded by any
+# signed-in GitHub user, so they are kept briefly. With RELEASE_TAG set, the
+# direct downloads (the NSIS installer and the linux-direct .deb) are also
+# published as a GitHub Release of this repository, under fixed names so that
+# /releases/latest/download/<name> always points at the newest version.
 # The result is reported as the `neus-ci/desktop` status on the source commit.
 name: Desktop
 
@@ -52,6 +55,11 @@ on:
         description: Days to keep the packages (public repository, keep it short)
         required: false
         default: '3'
+        type: string
+      RELEASE_TAG:
+        description: 'Publish the direct downloads as a GitHub Release with this tag (e.g. v1.0.0; it must match the app version). Empty: no release. Needs windows-direct and linux-direct.'
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -505,9 +513,57 @@ jobs:
           cache-key: flatpak-builder-${{ needs.start.outputs.sha }}
           upload-artifact: true
 
+  publish:
+    name: Publish the direct downloads
+    needs: [start, windows, linux]
+    # Not on windows' result: its notch smoke drives a real desktop session and
+    # can fail on a hosted runner after the installer was built and uploaded.
+    # A build that failed uploads nothing, and the download below then fails.
+    if: ${{ !cancelled() && inputs.RELEASE_TAG != '' && needs.linux.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with: { name: 'inbox-mail-windows-direct-${{ github.run_id }}', path: windows }
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with: { name: 'inbox-mail-linux-direct-deb-${{ github.run_id }}', path: linux }
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.RELEASE_TAG }}
+          SOURCE_SHA: ${{ needs.start.outputs.sha }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          exe="$(ls windows/*.exe)"
+          # The tag names the version the app was built as.
+          case "$(basename "$exe")" in *"_${version}_"*) ;; *) echo "::error::$(basename "$exe") is not version $version"; exit 1 ;; esac
+          deb_version="$(dpkg-deb --field linux/inbox-mail.deb Version)"
+          test "$deb_version" = "$version" || { echo "::error::the .deb is version $deb_version, not $version"; exit 1; }
+          mkdir out
+          cp "$exe" out/InboxMail-Setup.exe
+          cp linux/inbox-mail.deb out/inbox-mail_amd64.deb
+          (cd out && sha256sum InboxMail-Setup.exe inbox-mail_amd64.deb > SHA256SUMS.txt)
+          cat > notes.md <<NOTES
+          **InboxMail ${version}**: the desktop app of [useinbox.email](https://useinbox.email), for Windows and Linux.
+
+          | System | File |
+          | --- | --- |
+          | Windows 10 (1809) or later, 64-bit | \`InboxMail-Setup.exe\` |
+          | Debian, Ubuntu and derivatives, 64-bit | \`inbox-mail_amd64.deb\` (\`sudo apt install ./inbox-mail_amd64.deb\`) |
+
+          The installer is not signed yet: Windows SmartScreen may ask to confirm ("More info", then "Run anyway").
+          \`SHA256SUMS.txt\` holds the checksums. Built from zenderock/Neus-Platform@${SOURCE_SHA}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}.
+          NOTES
+          sed -i 's/^          //' notes.md
+          gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "InboxMail ${version}" --notes-file notes.md --latest
+          echo "Published ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
   report:
     name: Report final status
-    needs: [start, test, windows, linux, snap, flatpak]
+    needs: [start, test, windows, linux, snap, flatpak, publish]
     if: ${{ always() && needs.start.outputs.sha != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
