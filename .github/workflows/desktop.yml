@@ -180,6 +180,9 @@ jobs:
         if: steps.pick.outputs.run == 'true'
         env:
           INBOXMAIL_DISTRIBUTION_CHANNEL: ${{ matrix.channel }}
+          # SQLCipher builds OpenSSL from source: its Configure needs a full
+          # Perl, which Git Bash's is not. The runner ships Strawberry Perl.
+          OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
         run: npx tauri build ${{ matrix.bundle }} --config "packaging/tauri/${{ matrix.overlay }}"
 
       # --- windows-direct: install, notch smoke (Fill into Notepad), uninstall ---
