@@ -24,11 +24,20 @@ NSIS package is installed on the runner and the notch is tried for real: a
 sample code drops (`INBOXMAIL_NOTCH_SMOKE=10`), the main window is minimized, a
 text field is clicked, Fill is clicked and the code must reach that field; the
 screenshots go to a `ci-shots/<run>` branch. It reports `neus-ci/desktop` back to the source
-commit. Nothing is signed or published; packages are kept three days.
+commit. Nothing is signed; packages are kept three days.
+
+With `RELEASE_TAG` (for example `v1.0.0`, equal to the app's version), the run
+also publishes the direct downloads as a GitHub Release of neus-ci:
+`InboxMail-Setup.exe`, `inbox-mail_amd64.deb` and `SHA256SUMS.txt`. The names
+do not change from one version to the next, so
+`https://github.com/releaseszenderock/neus-ci/releases/latest/download/InboxMail-Setup.exe`
+always serves the newest installer. The job refuses a tag that does not match
+the version of both files; it needs `windows-direct` and `linux-direct`.
 
 ```bash
 gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=v5
 gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=my-branch -f CHANNELS=windows-direct,linux-direct -f LABEL="PR #510"
+gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=v5 -f CHANNELS=windows-direct,linux-direct -f RELEASE_TAG=v1.0.0
 ```
 
 ## Required repository secret
