@@ -15,7 +15,7 @@ gh workflow run gate.yml -R releaseszenderock/neus-ci -f SOURCE_REF=main
 gh workflow run gate.yml -R releaseszenderock/neus-ci -f SOURCE_REF=my-branch -f CHECKS=backend,sdk -f LABEL="PR #491"
 ```
 
-## Desktop app (Inbox Mail)
+## Desktop app (InboxMail)
 
 `.github/workflows/desktop.yml` builds the desktop app (`desktop/` in the
 source) from a branch, tag or commit: unit tests and typecheck, then one

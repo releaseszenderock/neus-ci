@@ -1,4 +1,4 @@
-# Inbox Mail desktop (desktop/ in the private zenderock/Neus-Platform), built on
+# InboxMail desktop (desktop/ in the private zenderock/Neus-Platform), built on
 # public runners: Actions cannot start runs in the private repository.
 #
 # This file is versioned in the private source (infra/github/neus-ci/) as the
@@ -268,7 +268,7 @@ jobs:
           while ($main -eq [IntPtr]::Zero -and ((Get-Date) - $started).TotalSeconds -lt 8) {
             Start-Sleep -Milliseconds 300
             foreach ($p in Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue) {
-              if ($p.MainWindowHandle -ne [IntPtr]::Zero -and [Input]::Title($p.MainWindowHandle) -eq 'Inbox Mail') { $main = $p.MainWindowHandle }
+              if ($p.MainWindowHandle -ne [IntPtr]::Zero -and [Input]::Title($p.MainWindowHandle) -in @('InboxMail', 'Inbox Mail')) { $main = $p.MainWindowHandle }
             }
           }
           if ($main -ne [IntPtr]::Zero) { [Input]::ShowWindow($main, 6) | Out-Null; "Main window minimized" } else { "Main window not found" }
@@ -306,7 +306,7 @@ jobs:
           Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue | Stop-Process -Force
           $uninstaller = Get-ChildItem (Split-Path $exe.FullName) -Filter 'uninstall*.exe' | Select-Object -First 1
           if ($uninstaller) { Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait }
-          if (-not $alive) { throw 'Inbox Mail did not stay running' }
+          if (-not $alive) { throw 'InboxMail did not stay running' }
           if ($text -notmatch '482193') { throw "Fill did not reach the text field (it holds '$text')" }
           "Fill typed the code into the focused field."
       - name: Push the notch screenshots to a ci-shots branch
@@ -371,7 +371,7 @@ jobs:
           Start-Process "shell:AppsFolder\$($package.PackageFamilyName)!InboxMail"
           Start-Sleep -Seconds 10
           $running = Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue
-          if ($null -eq $running) { throw 'Inbox Mail did not stay running' }
+          if ($null -eq $running) { throw 'InboxMail did not stay running' }
           $running | Stop-Process -Force
           Remove-AppxPackage -Package $package.PackageFullName
 
