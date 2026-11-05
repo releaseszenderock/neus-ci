@@ -1,0 +1,141 @@
+# npm packages of the private zenderock/Neus-Platform, published from public
+# runners: the TypeScript SDK (sdk/typescript, @zenderock/useinbox-sdk) and the
+# local MCP server (sdk/mcp, @zenderock/useinbox-mcp).
+#
+# Dispatched by hand (or with `gh workflow run npm.yml -R
+# releaseszenderock/neus-ci -f SOURCE_REF=main`), never by a push or a pull
+# request, so no fork can reach the tokens.
+#
+# The SDK goes first: the MCP server depends on it, and installing a published
+# MCP version needs its SDK version on the registry. Each package is tested or
+# built before it is published, and a version already on the registry is
+# skipped, so a run can be repeated safely. DRY_RUN packs and checks without
+# publishing.
+#
+# Required secrets: SOURCE_REPO_TOKEN (see README) and NPM_TOKEN (an npm
+# automation or granular token with publish rights on the @zenderock scope).
+name: npm
+
+run-name: npm ${{ inputs.SOURCE_REF }} (${{ inputs.PACKAGES }})${{ inputs.DRY_RUN && ' dry run' || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      SOURCE_REF:
+        description: Branch, tag or exact commit of zenderock/Neus-Platform
+        required: true
+        default: main
+        type: string
+      PACKAGES:
+        description: 'Comma-separated: sdk, mcp (or all)'
+        required: false
+        default: all
+        type: string
+      DRY_RUN:
+        description: Pack and check only, publish nothing
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: neus-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Test and publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DRY_RUN: ${{ inputs.DRY_RUN }}
+    steps:
+      # A fine-grained token limited to zenderock/Neus-Platform (Contents read).
+      # Credentials are not kept in the checkout.
+      - name: Check out private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: zenderock/Neus-Platform
+          ref: ${{ inputs.SOURCE_REF }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          persist-credentials: false
+          path: source
+
+      - name: Resolve source commit
+        env:
+          REQUESTED_SOURCE_REF: ${{ inputs.SOURCE_REF }}
+        run: |
+          sha="$(git -C source rev-parse HEAD)"
+          echo "\`zenderock/Neus-Platform\` ref \`${REQUESTED_SOURCE_REF}\`, commit \`${sha}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Check the npm token
+        if: ${{ !inputs.DRY_RUN }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::The NPM_TOKEN secret is missing."
+            exit 1
+          fi
+          echo "Publishing as $(npm whoami)."
+
+      # Publishes the package in the current directory unless its version is
+      # already on the registry. `npm publish` runs the package's own
+      # prepublishOnly (its build).
+      - name: Write the publish helper
+        run: |
+          cat > "$RUNNER_TEMP/publish.sh" <<'SCRIPT'
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on the registry: skipped."
+            echo "- \`${name}@${version}\`: already published, skipped" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm pack --dry-run
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "- \`${name}@${version}\`: dry run, not published" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          npm publish --access public
+          echo "- \`${name}@${version}\`: published" >> "$GITHUB_STEP_SUMMARY"
+          SCRIPT
+
+      - name: SDK - install and test
+        if: ${{ inputs.PACKAGES == 'all' || contains(inputs.PACKAGES, 'sdk') }}
+        working-directory: source/sdk/typescript
+        run: |
+          npm ci
+          npm test
+
+      - name: SDK - publish @zenderock/useinbox-sdk
+        if: ${{ inputs.PACKAGES == 'all' || contains(inputs.PACKAGES, 'sdk') }}
+        working-directory: source/sdk/typescript
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash "$RUNNER_TEMP/publish.sh"
+
+      # The MCP server's lockfile links the SDK from ../typescript, so the SDK
+      # is built first; the published MCP depends on the SDK from the registry.
+      - name: MCP - install and build
+        if: ${{ inputs.PACKAGES == 'all' || contains(inputs.PACKAGES, 'mcp') }}
+        run: |
+          (cd source/sdk/typescript && npm ci && npm run build)
+          (cd source/sdk/mcp && npm ci && npm run build)
+
+      - name: MCP - publish @zenderock/useinbox-mcp
+        if: ${{ inputs.PACKAGES == 'all' || contains(inputs.PACKAGES, 'mcp') }}
+        working-directory: source/sdk/mcp
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: bash "$RUNNER_TEMP/publish.sh"

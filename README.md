@@ -41,6 +41,19 @@ gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=my-branch
 gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=v5 -f CHANNELS=windows-direct,linux-direct -f RELEASE_TAG=v1.0.0
 ```
 
+## npm packages
+
+`.github/workflows/npm.yml` publishes the TypeScript SDK
+(`@zenderock/useinbox-sdk`, `sdk/typescript`) then the local MCP server
+(`@zenderock/useinbox-mcp`, `sdk/mcp`) from a branch, tag or commit. Each is
+tested or built first; a version already on npm is skipped, so a run can be
+repeated. `DRY_RUN=true` packs and checks without publishing.
+
+```bash
+gh workflow run npm.yml -R releaseszenderock/neus-ci -f SOURCE_REF=main
+gh workflow run npm.yml -R releaseszenderock/neus-ci -f SOURCE_REF=main -f DRY_RUN=true
+```
+
 ## Required repository secret
 
 - `SOURCE_REPO_TOKEN`: a fine-grained token limited to `zenderock/Neus-Platform`,
@@ -50,6 +63,8 @@ gh workflow run desktop.yml -R releaseszenderock/neus-ci -f SOURCE_REF=v5 -f CHA
   The direct builds (`windows-direct`, `linux-direct`) sign their packages with it,
   and a release ships `latest.json`, which the installed apps read to update
   themselves. Without the key those two builds fail.
+- `NPM_TOKEN`: an npm automation (or granular) token with publish rights on the
+  `@zenderock` scope, for `npm.yml`.
 
 The canonical copy of this workflow and the architecture notes live in the
 private source under `infra/github/neus-ci/` and `docs/ci.md`.
