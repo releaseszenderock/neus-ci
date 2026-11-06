@@ -10,11 +10,9 @@
 # One package per distribution channel; the channel is compiled in
 # (INBOXMAIL_DISTRIBUTION_CHANNEL), so a store build never runs its own
 # updater:
-#   windows-direct  NSIS installer (per user). Its smoke installs it, starts
-#                   the app with INBOXMAIL_NOTCH_SMOKE=10 (a sample code drops
-#                   from the notch 10 s later), minimizes the main window,
-#                   clicks into a text field, clicks Fill, checks that the
-#                   code reached the field, takes screenshots, uninstalls.
+#   windows-direct  NSIS installer (per user), uploaded as an artifact. The
+#                   former notch smoke (install, sample code, Fill, screenshots)
+#                   is removed: it failed on the hosted runners' desktop.
 #   windows-msix    MSIX with the Store identity, uploaded UNSIGNED: Microsoft
 #                   signs Store packages. Its smoke signs a local copy with an
 #                   ephemeral certificate (never uploaded), installs, launches
@@ -153,9 +151,6 @@ jobs:
     name: Windows (${{ matrix.id }})
     needs: [start, test]
     runs-on: windows-2025
-    # contents: write only to push the notch screenshots to a ci-shots/ branch.
-    permissions:
-      contents: write
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -201,7 +196,6 @@ jobs:
           OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
         run: npx tauri build ${{ matrix.bundle }} --config "packaging/tauri/${{ matrix.overlay }}"
 
-      # The installer is kept before the smoke, so a failing smoke still leaves it.
       - name: Upload the NSIS installer
         if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -211,139 +205,6 @@ jobs:
             source/desktop/src-tauri/target/release/bundle/nsis/*.exe
             source/desktop/src-tauri/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
-          retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
-
-      # --- windows-direct: install, notch smoke (Fill into a text field), uninstall ---
-      - name: Install the NSIS package and smoke the notch
-        if: steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          Add-Type @'
-          using System; using System.Runtime.InteropServices;
-          public static class Input {
-            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-            [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
-            [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-            [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-            [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-            [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);
-            public static string Title(IntPtr h) { var b = new System.Text.StringBuilder(256); GetWindowText(h, b, 256); return b.ToString(); }
-            public static string Foreground() { return Title(GetForegroundWindow()); }
-            public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(0x0002, 0, 0, 0, IntPtr.Zero); mouse_event(0x0004, 0, 0, 0, IntPtr.Zero); }
-          }
-          public struct RECT { public int Left, Top, Right, Bottom; }
-          '@
-          [Input]::SetProcessDPIAware() | Out-Null
-          New-Item -ItemType Directory -Force -Path smoke | Out-Null
-          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          "Screen: $($b.Width)x$($b.Height)"
-          function Shot($name) {
-            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-            $bmp.Save("smoke\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
-            $g.Dispose(); $bmp.Dispose()
-          }
-          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
-          Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait
-          $exe = Get-ChildItem "$env:LOCALAPPDATA" -Recurse -Filter 'inbox-mail.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($null -eq $exe) { throw 'inbox-mail.exe not installed' }
-          "Installed at $($exe.FullName)"
-          # A small window with a text field holds the keyboard; the notch must
-          # not take it. It writes what it received and closes after 60 s.
-          $out = Join-Path $env:RUNNER_TEMP 'fill-target.txt'
-          $target = Join-Path $env:RUNNER_TEMP 'fill-target.ps1'
-          Set-Content -Path $target -Value @"
-          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-          `$f = New-Object Windows.Forms.Form
-          `$f.Text = 'Fill target'; `$f.Width = 520; `$f.Height = 180; `$f.StartPosition = 'CenterScreen'
-          `$t = New-Object Windows.Forms.TextBox
-          `$t.Width = 460; `$t.Left = 20; `$t.Top = 40; `$t.Font = New-Object Drawing.Font('Segoe UI', 18)
-          `$f.Controls.Add(`$t)
-          `$timer = New-Object Windows.Forms.Timer
-          `$timer.Interval = 60000
-          `$timer.Add_Tick({ Set-Content -Path '$out' -Value `$t.Text; `$f.Close() })
-          `$timer.Start()
-          `$f.Add_Shown({ `$f.Activate(); `$t.Focus() })
-          [void]`$f.ShowDialog()
-          "@
-          $form = Start-Process powershell -ArgumentList '-NoProfile', '-STA', '-File', $target -PassThru
-          Start-Sleep -Seconds 4
-          # The sample code drops 10 s after start: time to put the app's main
-          # window away and give the keyboard to the field, as a user would.
-          $env:INBOXMAIL_NOTCH_SMOKE = '10'
-          $app = Start-Process -FilePath $exe.FullName -PassThru
-          $started = Get-Date
-          $main = [IntPtr]::Zero
-          while ($main -eq [IntPtr]::Zero -and ((Get-Date) - $started).TotalSeconds -lt 8) {
-            Start-Sleep -Milliseconds 300
-            foreach ($p in Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue) {
-              if ($p.MainWindowHandle -ne [IntPtr]::Zero -and [Input]::Title($p.MainWindowHandle) -in @('InboxMail', 'Inbox Mail')) { $main = $p.MainWindowHandle }
-            }
-          }
-          if ($main -ne [IntPtr]::Zero) { [Input]::ShowWindow($main, 6) | Out-Null; "Main window minimized" } else { "Main window not found" }
-          Start-Sleep -Milliseconds 800
-          $formProc = Get-Process -Id $form.Id
-          $r = New-Object RECT
-          [Input]::GetWindowRect($formProc.MainWindowHandle, [ref]$r) | Out-Null
-          "Fill target at $($r.Left),$($r.Top) - $($r.Right),$($r.Bottom)"
-          # Into the text box: the client area starts below the title bar.
-          [Input]::Click([int](($r.Left + $r.Right) / 2), $r.Top + 90)
-          Start-Sleep -Milliseconds 500
-          "Foreground once the field is clicked: '$([Input]::Foreground())'"
-          $wait = 13 - ((Get-Date) - $started).TotalSeconds
-          if ($wait -gt 0) { Start-Sleep -Seconds $wait }
-          "Foreground before Fill: '$([Input]::Foreground())'"
-          Shot '1-notch-down'
-          # Fill sits at the island's right: centre + 137 px, 75 px down.
-          [Input]::SetCursorPos([int]($b.Width / 2 + 137), 75) | Out-Null
-          Start-Sleep -Milliseconds 700
-          Shot '2-pointer-on-fill'
-          [Input]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
-          [Input]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
-          Start-Sleep -Seconds 2
-          "Foreground after Fill: '$([Input]::Foreground())'"
-          Shot '3-after-fill'
-          [Input]::SetCursorPos([int]($b.Width / 2 + 300), 200) | Out-Null
-          Start-Sleep -Milliseconds 500
-          Shot '4-pointer-beside'
-          $alive = -not $app.HasExited
-          $deadline = (Get-Date).AddSeconds(70)
-          while (-not (Test-Path $out) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
-          $text = if (Test-Path $out) { (Get-Content -Raw $out).Trim() } else { '<no answer>' }
-          "The text field holds: '$text'"
-          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-          Get-Process -Name 'inbox-mail' -ErrorAction SilentlyContinue | Stop-Process -Force
-          $uninstaller = Get-ChildItem (Split-Path $exe.FullName) -Filter 'uninstall*.exe' | Select-Object -First 1
-          if ($uninstaller) { Start-Process -FilePath $uninstaller.FullName -ArgumentList '/S' -Wait }
-          if (-not $alive) { throw 'InboxMail did not stay running' }
-          if ($text -notmatch '482193') { throw "Fill did not reach the text field (it holds '$text')" }
-          "Fill typed the code into the focused field."
-      - name: Push the notch screenshots to a ci-shots branch
-        if: always() && steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ls smoke/*.png >/dev/null 2>&1 || exit 0
-          dir="$RUNNER_TEMP/shots"; mkdir -p "$dir"; cp smoke/*.png "$dir/"
-          cd "$dir"
-          git init -q -b "ci-shots/${GITHUB_RUN_ID}"
-          git -c user.name="neus-ci" -c user.email="neus-ci@users.noreply.github.com" add .
-          git -c user.name="neus-ci" -c user.email="neus-ci@users.noreply.github.com" commit -qm "Notch screenshots, run ${GITHUB_RUN_ID}"
-          git push -q "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/ci-shots/${GITHUB_RUN_ID}"
-          echo "Screenshots: branch ci-shots/${GITHUB_RUN_ID}" >> "$GITHUB_STEP_SUMMARY"
-      - name: Upload the notch screenshots
-        if: always() && steps.pick.outputs.run == 'true' && matrix.id == 'windows-direct'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: notch-windows-screenshots-${{ github.run_id }}
-          path: source/desktop/smoke/*.png
-          if-no-files-found: ignore
           retention-days: ${{ fromJSON(inputs.RETENTION_DAYS) }}
 
       # --- windows-msix: assemble, smoke a locally signed copy ---
@@ -528,10 +389,8 @@ jobs:
   publish:
     name: Publish the direct downloads
     needs: [start, windows, linux]
-    # Not on windows' result: its notch smoke drives a real desktop session and
-    # can fail on a hosted runner after the installer was built and uploaded.
-    # A build that failed uploads nothing, and the download below then fails.
-    if: ${{ !cancelled() && inputs.RELEASE_TAG != '' && needs.linux.result == 'success' }}
+    # Both direct builds must succeed: nothing is published from a failed build.
+    if: ${{ !cancelled() && inputs.RELEASE_TAG != '' && needs.windows.result == 'success' && needs.linux.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
